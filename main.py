@@ -21,7 +21,12 @@ from agents.jury import Jury
 from filters.citation_filter import CitationFilter
 from graph.courtroom_graph import build_courtroom_graph, initial_state
 from data.jbb_loader import load_jbb
-from utils.pretty_print import print_full_result, console
+from utils.pretty_print import (
+    console,
+    print_case_header,
+    print_live_epilogue,
+    print_stream_update,
+)
 from rich.rule import Rule
 from rich.table import Table
 from rich import box
@@ -55,7 +60,7 @@ def parse_args():
     )
     parser.add_argument(
         "--verbose", action="store_true",
-        help="Print full trial transcript for each case"
+        help="Print each agent step as it runs (streaming transcript for each case)"
     )
     return parser.parse_args()
 
@@ -63,6 +68,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Build components
 # ---------------------------------------------------------------------------
+# Models for specific roles should be explored more.
 
 def build_components(model_name: str, jury_model_name: str, max_rounds: int):
     model = get_model(model_name)
@@ -83,20 +89,34 @@ def build_components(model_name: str, jury_model_name: str, max_rounds: int):
 
 def get_cases(split: str, n: int) -> list[dict]:
     """
-    Returns a list of dicts with keys: 'response' (str) and 'label' (str: HARMFUL or SAFE).
-    Uses the judge_comparison split which has model responses and ground-truth labels.
-    """
-    behaviors, judge_comparison = load_jbb()
-    dataset = judge_comparison[split]
+    Returns a list of dicts with keys:
+      - 'response' (str): the AI-generated response (Target field from JBB behaviors)
+      - 'prompt'   (str): the original user goal / jailbreak prompt (Goal field)
+      - 'label'    (str): ground-truth label — 'harmful' or 'benign'
 
+    Uses the JBB behaviors split which has harmful and benign cases.
+    """
+    behaviors, _ = load_jbb()
+    harmful_cases = behaviors["harmful"]
+    benign_cases  = behaviors["benign"]
+
+    half = n // 2
     cases = []
-    for row in dataset.select(range(min(n, len(dataset)))):
-        # JBB judge_comparison rows have: prompt, response, label (1=harmful, 0=safe)
-        label = "HARMFUL" if row.get("label", 0) == 1 else "SAFE"
+
+    for row in harmful_cases.select(range(min(half, len(harmful_cases)))):
         cases.append({
-            "response": row["response"],
-            "label": label,
+            "response": row["Target"],
+            "prompt":   row.get("Goal", ""),
+            "label":    "harmful",
         })
+
+    for row in benign_cases.select(range(min(half, len(benign_cases)))):
+        cases.append({
+            "response": row["Target"],
+            "prompt":   row.get("Goal", ""),
+            "label":    "benign",
+        })
+
     return cases
 
 
@@ -110,9 +130,9 @@ def compute_metrics(results: list[dict]) -> dict:
         return {}
 
     correct = sum(1 for r in results if r["predicted"] == r["ground_truth"])
-    tp = sum(1 for r in results if r["predicted"] == "HARMFUL" and r["ground_truth"] == "HARMFUL")
-    fp = sum(1 for r in results if r["predicted"] == "HARMFUL" and r["ground_truth"] == "SAFE")
-    fn = sum(1 for r in results if r["predicted"] == "SAFE"    and r["ground_truth"] == "HARMFUL")
+    tp = sum(1 for r in results if r["predicted"] == "harmful" and r["ground_truth"] == "harmful")
+    fp = sum(1 for r in results if r["predicted"] == "harmful" and r["ground_truth"] == "benign")
+    fn = sum(1 for r in results if r["predicted"] == "benign"    and r["ground_truth"] == "harmful")
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -172,23 +192,35 @@ def main():
     for i, case in enumerate(cases):
         console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
 
-        state = initial_state(case["response"], max_rounds=args.max_rounds)
+        state = initial_state(
+            case["response"],
+            max_rounds=args.max_rounds,
+            case_prompt=case.get("prompt", ""),
+        )
 
         try:
-            final_state = graph.invoke(state)
+            if args.verbose:
+                print_case_header({"case": case["response"]})
+                final_state = None
+                for chunk in graph.stream(state, stream_mode="updates"):
+                    for node_name, node_state in chunk.items():
+                        final_state = node_state
+                        print_stream_update(node_name, node_state)
+                if final_state is None:
+                    raise RuntimeError("Graph stream produced no updates")
+                predicted = final_state["final_verdict"]
+                print_live_epilogue(final_state, ground_truth=case["label"])
+            else:
+                final_state = graph.invoke(state)
+                predicted = final_state["final_verdict"]
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
             results.append({
-                "predicted":    "SAFE",   # conservative fallback
+                "predicted":    "benign",  # conservative fallback if trial did not complete
                 "ground_truth": case["label"],
                 "error":        str(e),
             })
             continue
-
-        predicted = final_state["final_verdict"]
-
-        if args.verbose:
-            print_full_result(final_state, ground_truth=case["label"])
 
         results.append({
             "predicted":    predicted,

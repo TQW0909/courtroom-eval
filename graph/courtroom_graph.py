@@ -1,14 +1,8 @@
 # graph/courtroom_graph.py
 
-from typing import TypedDict, List
+from typing import List, Optional, TypedDict
 from langgraph.graph import StateGraph, END
 
-from utils.pretty_print import (
-    print_case_header,
-    print_round,
-    print_jury_verdict,
-    print_summary,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -16,15 +10,17 @@ from utils.pretty_print import (
 # ---------------------------------------------------------------------------
 
 class CourtroomState(TypedDict):
-    case: str
-    round: int
+    case: str               # the AI-generated response under review
+    case_prompt: str        # the original user prompt that produced the response
+    round: int  # completed judge moderation steps (set in Judge; equals len(judge_decisions))
     max_rounds: int
     prosecution_args: List[str]
     defense_args: List[str]
     judge_decisions: List[str]      # CONTINUE or CLOSE per round
+    judge_rationales: List[str]     # one-sentence procedural reasoning per round
     jury_votes: List[dict]          # each juror's verdict + confidence + reason
-    final_verdict: str | None       # majority vote result
-    verdict_confidence: float | None
+    final_verdict: Optional[str]    # majority vote result
+    verdict_confidence: Optional[float]
     deliberation_complete: bool
     grounding_failures: int         # total filter failures across the whole trial (for reporting)
     consecutive_failures: int       # failures in the current turn only — resets to 0 on any pass
@@ -61,12 +57,10 @@ def build_courtroom_graph(prosecutor, defender, judge, jury, citation_filter):
     graph = StateGraph(CourtroomState)
 
     # ------------------------------------------------------------------
-    # Node definitions (thin wrappers that add pretty-print side-effects)
+    # Node definitions — pure state transformers, no side-effects
     # ------------------------------------------------------------------
 
     def prosecute_node(state: dict) -> dict:
-        if state["round"] == 0:
-            print_case_header(state)
         return prosecutor.argue(state)
 
     def filter_prosecution_node(state: dict) -> dict:
@@ -79,16 +73,10 @@ def build_courtroom_graph(prosecutor, defender, judge, jury, citation_filter):
         return citation_filter.validate_defense(state)
 
     def judge_node(state: dict) -> dict:
-        new_state = judge.moderate(state)
-        round_idx = len(new_state["prosecution_args"]) - 1
-        print_round(new_state, round_idx)
-        return new_state
+        return judge.moderate(state)
 
     def jury_node(state: dict) -> dict:
-        new_state = jury.deliberate(state)
-        print_jury_verdict(new_state)
-        print_summary(new_state)
-        return new_state
+        return jury.deliberate(state)
 
     # ------------------------------------------------------------------
     # Register nodes
@@ -165,10 +153,11 @@ def build_courtroom_graph(prosecutor, defender, judge, jury, citation_filter):
 # Convenience: default initial state
 # ---------------------------------------------------------------------------
 
-def initial_state(case: str, max_rounds: int = 4) -> CourtroomState:
+def initial_state(case: str, max_rounds: int = 4, case_prompt: str = "") -> CourtroomState:
     """Return a fresh CourtroomState for a given AI response under review."""
     return CourtroomState(
         case=case,
+        case_prompt=case_prompt,
         round=0,
         max_rounds=max_rounds,
         prosecution_args=[],
@@ -181,4 +170,5 @@ def initial_state(case: str, max_rounds: int = 4) -> CourtroomState:
         grounding_failures=0,
         consecutive_failures=0,
         last_filter_passed=True,
+        judge_rationales=[],
     )
