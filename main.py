@@ -20,6 +20,7 @@ from agents.judge import Judge
 from agents.jury import Jury
 from filters.citation_filter import CitationFilter
 from graph.courtroom_graph import build_courtroom_graph, initial_state
+from baselines.mirror import MirrorBaseline
 from data.jbb_loader import load_jbb
 from utils.pretty_print import (
     console,
@@ -61,6 +62,14 @@ def parse_args():
     parser.add_argument(
         "--verbose", action="store_true",
         help="Print each agent step as it runs (streaming transcript for each case)"
+    )
+    parser.add_argument(
+        "--baseline", default="courtroom", choices=["courtroom", "mirror"],
+        help="Evaluation method: 'courtroom' (default) or 'mirror' (MIRROR baseline)"
+    )
+    parser.add_argument(
+        "--mirror-iterations", type=int, default=5,
+        help="Max iterations for the MIRROR baseline (default: 5)"
     )
     return parser.parse_args()
 
@@ -172,23 +181,10 @@ def print_metrics(metrics: dict, model_name: str):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
-
-    console.print()
-    console.print(Rule("[bold white]Courtroom Eval[/bold white]", style="white"))
-    console.print(f"  Model:      [cyan]{args.model}[/cyan]")
-    console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
-    console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
-    console.print()
-
-    # Build graph
+def run_courtroom(args, cases: list[dict]) -> list[dict]:
     graph = build_components(args.model, args.jury_model, args.max_rounds)
-
-    # Load data
-    cases = get_cases(args.split, args.cases)
-
     results = []
+
     for i, case in enumerate(cases):
         console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
 
@@ -216,7 +212,7 @@ def main():
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
             results.append({
-                "predicted":    "benign",  # conservative fallback if trial did not complete
+                "predicted":    "benign",
                 "ground_truth": case["label"],
                 "error":        str(e),
             })
@@ -230,7 +226,80 @@ def main():
             "grounding_failures": final_state.get("grounding_failures", 0),
         })
 
-    # Summary
+    return results
+
+
+def run_mirror(args, cases: list[dict]) -> list[dict]:
+    model1 = get_model(args.model)
+    model2 = get_model(args.jury_model or args.model)
+    mirror = MirrorBaseline(
+        model1=model1,
+        model2=model2,
+        max_iterations=args.mirror_iterations,
+        verbose=args.verbose,
+    )
+    results = []
+
+    for i, case in enumerate(cases):
+        console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
+
+        try:
+            outcome = mirror.classify(
+                prompt=case.get("prompt", ""),
+                response=case["response"],
+            )
+            predicted = outcome["verdict"]
+
+            if args.verbose:
+                converged_str = "yes" if outcome["converged"] else "no (tie-break)"
+                console.print(
+                    f"  Verdict: [bold]{predicted}[/bold]  "
+                    f"conf={outcome['confidence']:.2f}  "
+                    f"iters={outcome['iterations']}  converged={converged_str}"
+                )
+        except Exception as e:
+            console.print(f"  [bold red]ERROR:[/bold red] {e}")
+            results.append({
+                "predicted":    "benign",
+                "ground_truth": case["label"],
+                "error":        str(e),
+            })
+            continue
+
+        results.append({
+            "predicted":    predicted,
+            "ground_truth": case["label"],
+            "confidence":   outcome["confidence"],
+            "iterations":   outcome["iterations"],
+            "converged":    outcome["converged"],
+        })
+
+    return results
+
+
+def main():
+    args = parse_args()
+
+    baseline_label = f"MIRROR (max {args.mirror_iterations} iters)" \
+        if args.baseline == "mirror" else "Courtroom"
+
+    console.print()
+    console.print(Rule(f"[bold white]Courtroom Eval — {baseline_label}[/bold white]", style="white"))
+    console.print(f"  Model:      [cyan]{args.model}[/cyan]")
+    if args.baseline == "courtroom":
+        console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
+    else:
+        console.print(f"  Max iters:  [cyan]{args.mirror_iterations}[/cyan]")
+    console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
+    console.print()
+
+    cases = get_cases(args.split, args.cases)
+
+    if args.baseline == "mirror":
+        results = run_mirror(args, cases)
+    else:
+        results = run_courtroom(args, cases)
+
     metrics = compute_metrics(results)
     print_metrics(metrics, args.model)
 

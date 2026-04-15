@@ -74,6 +74,65 @@ The pipeline uses the **JailbreakBench (JBB)** `behaviors` split, which contains
 Both fields are shown to all agents and displayed in the terminal output.
 
 
+## Baselines
+
+### MIRROR
+
+MIRROR (**M**ulti-LLM **I**terative **R**eview and **R**esponse for **O**ptimized **R**ating) is a method originally proposed for automated evaluation of open-ended question generation ([arXiv:2410.12893](https://arxiv.org/abs/2410.12893)). The core idea is that two independent LLM evaluators iteratively review the same content, each receiving the other's previous assessment as feedback, until they converge on a shared judgment.
+
+Here the method is adapted for binary safety classification. Each evaluator produces a structured assessment on every round:
+
+```
+Verdict:    harmful | benign
+Confidence: 0.0–1.0
+Strengths:  one sentence — mitigating factors or benign aspects
+Flaws:      one sentence — concerning or harmful aspects
+```
+
+**How it works:**
+
+1. **Round 1** — Both evaluators independently assess the response (no peer feedback yet).
+2. **Round N+1** — Each evaluator receives the other's latest assessment and reconsiders: update the verdict if the peer raised a valid point, or hold the position with a counter-argument.
+3. **Convergence** — The loop terminates early when both evaluators agree on the same verdict for two consecutive rounds, matching the original paper's criterion. If they never converge, the evaluator with higher confidence wins.
+
+This is implemented in [`baselines/mirror.py`](baselines/mirror.py).
+
+**Usage:**
+
+```bash
+# Run MIRROR with a local model
+python main.py --baseline mirror --model llama3:8b-instruct-q4_K_M --cases 20
+
+# Use different models for each evaluator
+python main.py --baseline mirror --model gpt-4o-mini --jury-model gpt-4o --cases 20
+
+# Limit iterations (default: 5)
+python main.py --baseline mirror --mirror-iterations 3 --cases 20
+
+# Verbose — prints each round's assessments
+python main.py --baseline mirror --verbose --cases 5
+```
+
+**Additional CLI flags for MIRROR:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baseline` | `courtroom` | Set to `mirror` to use the MIRROR baseline |
+| `--jury-model` | same as `--model` | Model for Evaluator-2 (Evaluator-1 uses `--model`) |
+| `--mirror-iterations` | `5` | Maximum rounds before tie-break |
+
+**Results** (`llama3:8b-instruct-q4_K_M`, 20 cases, test split):
+
+| Metric    | Value  |
+|-----------|--------|
+| Cases     | 20     |
+| Correct   | 17     |
+| Accuracy  | 85.0%  |
+| Precision | 88.9%  |
+| Recall    | 80.0%  |
+| F1        | 0.842  |
+
+
 ## Repository Structure
 
 ```
@@ -88,6 +147,9 @@ courtroom-eval/
 │   ├── defender.py          # Mitigation-review agent with few-shot examples
 │   ├── judge.py             # Procedural moderator (CONTINUE / CLOSE)
 │   └── jury.py              # 3-juror panel with majority vote
+│
+├── baselines/
+│   └── mirror.py            # MIRROR baseline (arXiv:2410.12893) adapted for safety classification
 │
 ├── filters/
 │   └── citation_filter.py   # Verbatim-quote grounding check with retry/forfeit logic
@@ -160,11 +222,13 @@ python main.py --model gpt-4o --jury-model gpt-4o-mini --cases 10
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--model` | `gpt-4o-mini` | Model for prosecution, defense, and judge |
-| `--jury-model` | same as `--model` | Separate model for the 3 jurors |
-| `--max-rounds` | `4` | Maximum debate rounds before forced close |
+| `--jury-model` | same as `--model` | Separate model for the 3 jurors (or MIRROR Evaluator-2) |
+| `--max-rounds` | `4` | Maximum debate rounds before forced close (courtroom only) |
 | `--cases` | `10` | Number of cases to evaluate |
 | `--split` | `test` | JBB dataset split (`train` or `test`) |
 | `--verbose` | off | Print full trial transcript for each case |
+| `--baseline` | `courtroom` | Evaluation method: `courtroom` or `mirror` |
+| `--mirror-iterations` | `5` | Maximum rounds for the MIRROR baseline |
 
 ### Output
 
