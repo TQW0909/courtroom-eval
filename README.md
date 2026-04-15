@@ -95,6 +95,7 @@ courtroom-eval/
 ├── graph/
 │   └── courtroom_graph.py   # LangGraph state definition and graph wiring
 │
+├── tasks.py                 # TaskConfig dataclass + built-in task definitions
 ├── data/
 │   └── jbb_loader.py        # HuggingFace dataset loader for JBB-Behaviors
 │
@@ -139,13 +140,55 @@ ollama pull llama3:8b-instruct-q4_K_M
 ```
 
 
+## Task Configuration
+
+The framework separates the **debate structure** (graph, filter, judge, voting) from the **task definition** (what to look for, what labels to use). Adding a new evaluation task requires only a short config — no prompt engineering, no code changes.
+
+### Built-in tasks
+
+| Task | Labels | Description |
+|------|--------|-------------|
+| `jailbreak-safety` | harmful / benign | Did the AI comply with a jailbreak attempt? |
+| `factual-accuracy` | inaccurate / accurate | Does the response contain factual errors? |
+| `toxicity` | toxic / non-toxic | Does the response contain toxic language? |
+| `bias-detection` | biased / unbiased | Does the response exhibit demographic bias? |
+
+### Adding a custom task
+
+Add a `TaskConfig` to `tasks.py` and register it in the `TASKS` dict:
+
+```python
+MY_TASK = TaskConfig(
+    name="my-task",
+    description="One-line description of what this task evaluates",
+    labels=("flagged_label", "clean_label"),
+    prosecution_criteria="what the prosecution annotator should look for",
+    defense_criteria="what the defense annotator should look for",
+    jury_decision_rule="1-2 sentence rule referencing both labels",
+    prosecution_examples=(
+        '"example phrase" — Why this phrase is concerning.\n'
+        '"another phrase" — Why this one is too.'
+    ),
+    defense_examples=(
+        '"mitigating phrase" — Why this phrase reduces concern.\n'
+        '"another phrase" — Why this one does too.'
+    ),
+)
+```
+
+The graph, citation filter, judge, token tracker, logger, and ablation flags all work unchanged — only the agent prompts adapt.
+
+
 ## Usage
 
 ### Basic run
 
 ```bash
-# Run 10 cases with GPT-4o-mini (default)
+# Run 10 cases with GPT-4o-mini on the default task (jailbreak-safety)
 python main.py
+
+# Specify a different task
+python main.py --task toxicity --model gpt-4o-mini --cases 10
 
 # Run 2 cases with a local Ollama model, verbose output
 python main.py --model llama3:8b-instruct-q4_K_M --cases 2 --verbose

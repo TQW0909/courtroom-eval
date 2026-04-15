@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import get_model
+from tasks import TASKS, DEFAULT_TASK, TaskConfig
 from agents.prosecutor import Prosecutor
 from agents.defender import Defender
 from agents.judge import Judge
@@ -58,6 +59,12 @@ def parse_args():
     parser.add_argument(
         "--jury-model", default=None,
         help="Separate model for jurors. Falls back to --model if not set."
+    )
+
+    # Task selection
+    parser.add_argument(
+        "--task", default=DEFAULT_TASK, choices=list(TASKS.keys()),
+        help=f"Evaluation task (default: {DEFAULT_TASK}). Available: {', '.join(TASKS.keys())}"
     )
 
     # Pipeline parameters
@@ -105,28 +112,28 @@ def parse_args():
 # Build components
 # ---------------------------------------------------------------------------
 
-def build_components(args, tracker: TokenTracker):
+def build_components(args, tracker: TokenTracker, task: TaskConfig):
     """
     Build the LangGraph pipeline from CLI args.
 
     The TokenTracker callback is attached to every model so that token usage
     and latency are captured automatically on every LLM call.
+    The TaskConfig is passed to every agent so prompts adapt to the task.
     """
     callbacks = [tracker]
 
     model      = get_model(args.model, callbacks=callbacks)
     jury_model = get_model(args.jury_model or args.model, callbacks=callbacks)
 
-    prosecutor = Prosecutor(model=model)
+    prosecutor = Prosecutor(model=model, task=task)
     judge      = Judge(model=model, max_rounds=args.max_rounds)
-    jury       = Jury(models=[jury_model] * args.jurors)
+    jury       = Jury(models=[jury_model] * args.jurors, task=task)
 
     # Ablation: defense
     if args.no_defense:
-        # Use a stub defender that always produces "[no defense — ablation]"
         defender = _StubDefender()
     else:
-        defender = Defender(model=model)
+        defender = Defender(model=model, task=task)
 
     # Ablation: citation filter
     if args.no_filter:
@@ -276,9 +283,14 @@ def print_token_summary(totals: dict):
 def main():
     args = parse_args()
 
+    # --- Resolve task ---
+    task = TASKS[args.task]
+
     # --- Header ---
     console.print()
     console.print(Rule("[bold white]Courtroom Eval[/bold white]", style="white"))
+    console.print(f"  Task:       [cyan]{task.name}[/cyan] — {task.description}")
+    console.print(f"  Labels:     [cyan]{task.labels[0]}[/cyan] / [cyan]{task.labels[1]}[/cyan]")
     console.print(f"  Model:      [cyan]{args.model}[/cyan]")
     console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
     console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
@@ -299,13 +311,15 @@ def main():
     tracker = TokenTracker()
 
     # --- Build graph ---
-    graph = build_components(args, tracker)
+    graph = build_components(args, tracker, task)
 
     # --- Load data ---
     cases = get_cases(args.split, args.cases)
 
     # --- Run logger (optional) ---
     run_config = {
+        "task": task.name,
+        "labels": list(task.labels),
         "model": args.model,
         "jury_model": args.jury_model or args.model,
         "max_rounds": args.max_rounds,

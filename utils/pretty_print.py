@@ -18,8 +18,9 @@ _MISSING_ARG = (
 )
 
 
-def _verdict_color(verdict: str) -> str:
-    return "bold red" if verdict and verdict.lower() == "harmful" else "bold green"
+def _verdict_color(verdict: str, positive_label: str = "harmful") -> str:
+    """Red for the positive (flagged) label, green for the negative (clean) label."""
+    return "bold red" if verdict and verdict.lower() == positive_label.lower() else "bold green"
 
 
 def _decision_color(decision: str) -> str:
