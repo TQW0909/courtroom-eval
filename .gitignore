@@ -2,3 +2,5 @@
 .venv
 *.pyc
 __pycache__/
+test_*
+test.py
