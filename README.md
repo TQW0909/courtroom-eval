@@ -99,7 +99,9 @@ courtroom-eval/
 │   └── jbb_loader.py        # HuggingFace dataset loader for JBB-Behaviors
 │
 ├── utils/
-│   └── pretty_print.py      # Rich terminal output (panels, tables, color-coded verdicts)
+│   ├── pretty_print.py      # Rich terminal output (panels, tables, color-coded verdicts)
+│   ├── token_tracker.py     # LangChain callback handler for token usage + latency
+│   └── run_logger.py        # Structured JSONL logger for run results and comparison
 │
 ├── test_agents.py           # Unit tests for all agents (mocked models)
 └── test_graph.py            # Integration tests for graph flow, filter logic, routing
@@ -164,7 +166,11 @@ python main.py --model gpt-4o --jury-model gpt-4o-mini --cases 10
 | `--max-rounds` | `4` | Maximum debate rounds before forced close |
 | `--cases` | `10` | Number of cases to evaluate |
 | `--split` | `test` | JBB dataset split (`train` or `test`) |
+| `--jurors` | `3` | Number of independent jurors in the jury panel |
 | `--verbose` | off | Print full trial transcript for each case |
+| `--log PATH` | off | Write structured JSONL run log to the given file |
+| `--no-filter` | off | Ablation: disable citation filter (all arguments pass) |
+| `--no-defense` | off | Ablation: disable defense agent (prosecution-only) |
 
 ### Output
 
@@ -193,6 +199,59 @@ The pipeline reports standard binary classification metrics where `harmful` is t
 │ F1             │ 1.000      │
 ╰────────────────┴────────────╯
 ```
+
+
+## Logging and Comparison
+
+The `--log` flag writes a structured JSONL record for each run. Every record contains the full run config, per-case results (verdict, confidence, rounds, grounding failures, token usage by role), and aggregate metrics. Multiple runs append to the same file for easy comparison.
+
+```bash
+# Run the same cases across two models
+python main.py --model gpt-4o-mini       --cases 20 --log results/runs.jsonl
+python main.py --model llama3:8b-instruct-q4_K_M --cases 20 --log results/runs.jsonl
+
+# Compare in Python
+import json
+runs = [json.loads(line) for line in open("results/runs.jsonl")]
+for r in runs:
+    cfg = r["config"]
+    m = r["metrics"]
+    t = r["totals"]
+    print(f'{cfg["model"]:<30} acc={m["accuracy"]:.1%}  f1={m["f1"]:.3f}  '
+          f'tokens={t["total_tokens"]:,}  latency={t["total_latency_ms"]/1000:.1f}s')
+```
+
+Token usage is tracked per LLM call via a LangChain callback handler that works with both OpenAI (via `usage_metadata`) and Ollama (via `prompt_eval_count` / `eval_count` in generation metadata). Each call is tagged by agent role (prosecutor, defender, judge, juror) so you can break down cost by pipeline component. A resource usage summary table is printed at the end of every run.
+
+
+## Ablation Studies
+
+Ablation flags let you disable pipeline components to measure their contribution:
+
+```bash
+# No citation filter — do grounding constraints improve accuracy?
+python main.py --model gpt-4o-mini --no-filter --cases 20 --log results/runs.jsonl
+
+# No defense — does adversarial review matter vs prosecution-only?
+python main.py --model gpt-4o-mini --no-defense --cases 20 --log results/runs.jsonl
+
+# Vary jury size — does more jurors reduce variance?
+python main.py --model gpt-4o-mini --jurors 1 --cases 20 --log results/runs.jsonl
+python main.py --model gpt-4o-mini --jurors 5 --cases 20 --log results/runs.jsonl
+
+# Vary debate depth — are more rounds worth the token cost?
+python main.py --model gpt-4o-mini --max-rounds 2 --cases 20 --log results/runs.jsonl
+python main.py --model gpt-4o-mini --max-rounds 6 --cases 20 --log results/runs.jsonl
+```
+
+All ablation flags are recorded in the JSONL log config so runs are self-documenting and reproducible.
+
+| Ablation | What it tests | Flag |
+|----------|--------------|------|
+| No citation filter | Whether grounding constraints improve accuracy or just add latency | `--no-filter` |
+| No defense | Whether adversarial structure outperforms single-annotator classification | `--no-defense` |
+| Jury size | Variance reduction from ensemble voting (1, 3, 5 jurors) | `--jurors N` |
+| Debate depth | Token cost vs. accuracy tradeoff at different round limits | `--max-rounds N` |
 
 
 ## Testing
