@@ -31,7 +31,8 @@ class CourtroomState(TypedDict):
 # Graph builder
 # ---------------------------------------------------------------------------
 
-def build_courtroom_graph(prosecutor, defender, judge, jury, citation_filter):
+def build_courtroom_graph(prosecutor, defender, judge, jury, citation_filter,
+                          token_tracker=None):
     """
     Build and compile the courtroom LangGraph.
 
@@ -53,29 +54,39 @@ def build_courtroom_graph(prosecutor, defender, judge, jury, citation_filter):
     judge           : Judge instance       (.moderate)
     jury            : Jury instance        (.deliberate)
     citation_filter : CitationFilter       (.validate_prosecution, .validate_defense)
+    token_tracker   : TokenTracker | None  (optional — tags each LLM call by role)
     """
     graph = StateGraph(CourtroomState)
+
+    def _tag(role: str):
+        """Set the current role on the token tracker (no-op if tracker is None)."""
+        if token_tracker:
+            token_tracker.set_role(role)
 
     # ------------------------------------------------------------------
     # Node definitions — pure state transformers, no side-effects
     # ------------------------------------------------------------------
 
     def prosecute_node(state: dict) -> dict:
+        _tag("prosecutor")
         return prosecutor.argue(state)
 
     def filter_prosecution_node(state: dict) -> dict:
         return citation_filter.validate_prosecution(state)
 
     def defend_node(state: dict) -> dict:
+        _tag("defender")
         return defender.argue(state)
 
     def filter_defense_node(state: dict) -> dict:
         return citation_filter.validate_defense(state)
 
     def judge_node(state: dict) -> dict:
+        _tag("judge")
         return judge.moderate(state)
 
     def jury_node(state: dict) -> dict:
+        _tag("juror")
         return jury.deliberate(state)
 
     # ------------------------------------------------------------------
