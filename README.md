@@ -167,6 +167,17 @@ python main.py --baseline majority-rules --verbose --cases 5
 | `--baseline` | `courtroom` | Set to `majority-rules` |
 | `--voters` | `5` | Number of independent voter LLMs |
 
+**Results** (`llama3:8b-instruct-q4_K_M`, 20 cases, test split):
+
+| Metric    | Value  |
+|-----------|--------|
+| Cases     | 20     |
+| Correct   | 13     |
+| Accuracy  | 65.0%  |
+| Precision | 71.4%  |
+| Recall    | 50.0%  |
+| F1        | 0.588  |
+
 
 ### Multi-Agent Debate
 
@@ -209,6 +220,17 @@ python main.py --baseline debate --verbose --cases 5
 |------|---------|-------------|
 | `--baseline` | `courtroom` | Set to `debate` |
 | `--debate-rounds` | `3` | Number of Critic + Defender exchange rounds |
+
+**Results** (`llama3:8b-instruct-q4_K_M`, 20 cases, test split):
+
+| Metric    | Value  |
+|-----------|--------|
+| Cases     | 20     |
+| Correct   | 18     |
+| Accuracy  | 90.0%  |
+| Precision | 90.0%  |
+| Recall    | 90.0%  |
+| F1        | 0.900  |
 
 
 ## Repository Structure
