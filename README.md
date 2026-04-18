@@ -133,6 +133,84 @@ python main.py --baseline mirror --verbose --cases 5
 | F1        | 0.842  |
 
 
+### Majority Rules
+
+Based on "Majority Rules: LLM Ensemble is a Winning Approach for Content Categorization" ([arXiv:2511.15714](https://arxiv.org/abs/2511.15714)). The core idea is that N independent LLMs each classify the response under identical zero-shot conditions, with no communication between them. The final verdict is determined by majority vote.
+
+This serves as a **lower-bound comparison** against the debate-based approaches: if the Courtroom or Multi-Agent Debate pipelines outperform simple majority voting, the adversarial structure itself is adding value beyond what diverse model opinions alone can provide.
+
+**How it works:**
+
+1. Each of N voter models receives the same prompt and response independently.
+2. Each outputs a verdict, confidence score, and one-sentence reason.
+3. Final verdict = majority vote; confidence = average across all voters.
+
+This is implemented in [`baselines/majority_rules.py`](baselines/majority_rules.py).
+
+**Usage:**
+
+```bash
+# Run with 5 voters (default)
+python main.py --baseline majority-rules --model gpt-4o-mini --cases 20
+
+# Change the number of voters
+python main.py --baseline majority-rules --voters 7 --cases 20
+
+# Verbose — prints each voter's verdict as it completes
+python main.py --baseline majority-rules --verbose --cases 5
+```
+
+**CLI flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baseline` | `courtroom` | Set to `majority-rules` |
+| `--voters` | `5` | Number of independent voter LLMs |
+
+
+### Multi-Agent Debate
+
+Based on "Efficient LLM Safety Evaluation through Multi-Agent Debate" ([arXiv:2511.06396](https://arxiv.org/abs/2511.06396)). Three role-specific agents — **Critic**, **Defender**, and **Judge** — conduct a structured debate over a fixed number of rounds. After all rounds the Judge synthesises the transcript into a final binary verdict.
+
+This is the **closest structural relative** to the Courtroom pipeline. The key differences are:
+
+| | Courtroom | Multi-Agent Debate |
+|---|---|---|
+| Citation grounding | Required (verbatim quotes) | None |
+| Round control | Dynamic (Judge decides CONTINUE/CLOSE) | Fixed N rounds |
+| Final decision | 3-juror majority vote | Judge agent directly |
+
+These differences make it a precise ablation: it tests the adversarial debate skeleton without the citation-grounding constraint or jury panel, isolating how much those two additions contribute.
+
+**How it works:**
+
+1. **Round 1** — Critic identifies evidence the response is harmful; Defender argues it is benign.
+2. **Round N** — Each agent reads the other's previous argument and rebuts or reinforces their position.
+3. **Judge** — Reads the full debate transcript and issues the final verdict with a confidence score.
+
+This is implemented in [`baselines/multi_agent_debate.py`](baselines/multi_agent_debate.py).
+
+**Usage:**
+
+```bash
+# Run with 3 debate rounds (default)
+python main.py --baseline debate --model gpt-4o-mini --cases 20
+
+# Change the number of rounds
+python main.py --baseline debate --debate-rounds 5 --cases 20
+
+# Verbose — prints each agent's argument as it runs
+python main.py --baseline debate --verbose --cases 5
+```
+
+**CLI flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baseline` | `courtroom` | Set to `debate` |
+| `--debate-rounds` | `3` | Number of Critic + Defender exchange rounds |
+
+
 ## Repository Structure
 
 ```
@@ -149,7 +227,9 @@ courtroom-eval/
 │   └── jury.py              # 3-juror panel with majority vote
 │
 ├── baselines/
-│   └── mirror.py            # MIRROR baseline (arXiv:2410.12893) adapted for safety classification
+│   ├── mirror.py            # MIRROR baseline (arXiv:2410.12893) — iterative two-LLM convergence
+│   ├── majority_rules.py    # Majority Rules baseline (arXiv:2511.15714) — silent N-voter ensemble
+│   └── multi_agent_debate.py # Multi-Agent Debate baseline (arXiv:2511.06396) — Critic/Defender/Judge
 │
 ├── filters/
 │   └── citation_filter.py   # Verbatim-quote grounding check with retry/forfeit logic
@@ -273,8 +353,10 @@ python main.py --model gpt-4o --jury-model gpt-4o-mini --cases 10
 | `--split` | `test` | JBB dataset split (`train` or `test`) |
 | `--jurors` | `3` | Number of independent jurors in the jury panel |
 | `--verbose` | off | Print full trial transcript for each case |
-| `--baseline` | `courtroom` | Evaluation method: `courtroom` or `mirror` |
+| `--baseline` | `courtroom` | Evaluation method: `courtroom`, `mirror`, `majority-rules`, or `debate` |
 | `--mirror-iterations` | `5` | Maximum rounds for the MIRROR baseline |
+| `--voters` | `5` | Number of independent voters for the majority-rules baseline |
+| `--debate-rounds` | `3` | Number of Critic+Defender rounds for the debate baseline |
 | `--log PATH` | off | Write structured JSONL run log to the given file |
 | `--no-filter` | off | Ablation: disable citation filter (all arguments pass) |
 | `--no-defense` | off | Ablation: disable defense agent (prosecution-only) |

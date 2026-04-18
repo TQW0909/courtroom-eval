@@ -30,6 +30,8 @@ from agents.jury import Jury
 from filters.citation_filter import CitationFilter, NoOpFilter
 from graph.courtroom_graph import build_courtroom_graph, initial_state
 from baselines.mirror import MirrorBaseline
+from baselines.majority_rules import MajorityRulesBaseline
+from baselines.multi_agent_debate import MultiAgentDebateBaseline
 from data.jbb_loader import load_jbb
 from utils.token_tracker import TokenTracker
 from utils.run_logger import RunLogger
@@ -106,12 +108,24 @@ def parse_args():
         help="Path to JSONL file for structured run logging (e.g. results/runs.jsonl)"
     )
     parser.add_argument(
-        "--baseline", default="courtroom", choices=["courtroom", "mirror"],
-        help="Evaluation method: 'courtroom' (default) or 'mirror' (MIRROR baseline)"
+        "--baseline", default="courtroom",
+        choices=["courtroom", "mirror", "majority-rules", "debate"],
+        help=(
+            "Evaluation method: 'courtroom' (default), 'mirror' (MIRROR iterative), "
+            "'majority-rules' (silent ensemble vote), 'debate' (multi-agent debate)"
+        )
     )
     parser.add_argument(
         "--mirror-iterations", type=int, default=5,
         help="Max iterations for the MIRROR baseline (default: 5)"
+    )
+    parser.add_argument(
+        "--voters", type=int, default=5,
+        help="Number of independent voters for the majority-rules baseline (default: 5)"
+    )
+    parser.add_argument(
+        "--debate-rounds", type=int, default=3,
+        help="Number of Critic+Defender rounds for the debate baseline (default: 3)"
     )
 
     return parser.parse_args()
@@ -423,11 +437,109 @@ def run_mirror(args, cases: list[dict], negative_label: str = "benign") -> list[
     return results
 
 
+def run_majority_rules(args, cases: list[dict],
+                        labels: tuple[str, str] = ("harmful", "benign")) -> list[dict]:
+    model = get_model(args.model)
+    majority = MajorityRulesBaseline(
+        models=[model] * args.voters,
+        verbose=args.verbose,
+    )
+    results = []
+
+    for i, case in enumerate(cases):
+        console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
+
+        try:
+            outcome = majority.classify(
+                prompt=case.get("prompt", ""),
+                response=case["response"],
+                labels=labels,
+            )
+            predicted = outcome["verdict"]
+
+            if args.verbose:
+                console.print(
+                    f"  Verdict: [bold]{predicted}[/bold]  "
+                    f"conf={outcome['confidence']:.2f}  "
+                    f"votes={outcome['positive_votes']}/{outcome['total_voters']} for {labels[0]}"
+                )
+        except Exception as e:
+            console.print(f"  [bold red]ERROR:[/bold red] {e}")
+            results.append({
+                "predicted":    labels[1],
+                "ground_truth": case["label"],
+                "error":        str(e),
+            })
+            continue
+
+        results.append({
+            "predicted":    predicted,
+            "ground_truth": case["label"],
+            "confidence":   outcome["confidence"],
+            "positive_votes": outcome["positive_votes"],
+            "total_voters": outcome["total_voters"],
+        })
+
+    return results
+
+
+def run_debate(args, cases: list[dict],
+               labels: tuple[str, str] = ("harmful", "benign")) -> list[dict]:
+    model = get_model(args.model)
+    debate = MultiAgentDebateBaseline(
+        model=model,
+        debate_rounds=args.debate_rounds,
+        verbose=args.verbose,
+    )
+    results = []
+
+    for i, case in enumerate(cases):
+        console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
+
+        try:
+            outcome = debate.classify(
+                prompt=case.get("prompt", ""),
+                response=case["response"],
+                labels=labels,
+            )
+            predicted = outcome["verdict"]
+
+            if args.verbose:
+                console.print(
+                    f"  Verdict: [bold]{predicted}[/bold]  "
+                    f"conf={outcome['confidence']:.2f}  "
+                    f"rounds={outcome['rounds']}  — {outcome['judge_reason']}"
+                )
+        except Exception as e:
+            console.print(f"  [bold red]ERROR:[/bold red] {e}")
+            results.append({
+                "predicted":    labels[1],
+                "ground_truth": case["label"],
+                "error":        str(e),
+            })
+            continue
+
+        results.append({
+            "predicted":    predicted,
+            "ground_truth": case["label"],
+            "confidence":   outcome["confidence"],
+            "rounds":       outcome["rounds"],
+            "judge_reason": outcome["judge_reason"],
+        })
+
+    return results
+
+
 def main():
     args = parse_args()
 
-    baseline_label = f"MIRROR (max {args.mirror_iterations} iters)" \
-        if args.baseline == "mirror" else "Courtroom"
+    _BASELINE_LABELS = {
+        "courtroom":     "Courtroom",
+        "mirror":        f"MIRROR (max {args.mirror_iterations} iters)",
+        "majority-rules": f"Majority Rules ({args.voters} voters)",
+        "debate":        f"Multi-Agent Debate ({args.debate_rounds} rounds)",
+    }
+    baseline_label = _BASELINE_LABELS[args.baseline]
 
     task = TASKS[args.task]
 
@@ -435,6 +547,7 @@ def main():
     console.print(Rule(f"[bold white]Courtroom Eval — {baseline_label}[/bold white]", style="white"))
     console.print(f"  Task:       [cyan]{task.name}[/cyan] — {task.description}")
     console.print(f"  Model:      [cyan]{args.model}[/cyan]")
+
     if args.baseline == "courtroom":
         console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
         console.print(f"  Jurors:     [cyan]{args.jurors}[/cyan]")
@@ -447,15 +560,26 @@ def main():
             console.print(f"  Ablation:   [yellow]{', '.join(ablation_flags)}[/yellow]")
         if args.log:
             console.print(f"  Logging to: [dim]{args.log}[/dim]")
-    else:
+    elif args.baseline == "mirror":
         console.print(f"  Max iters:  [cyan]{args.mirror_iterations}[/cyan]")
+    elif args.baseline == "majority-rules":
+        console.print(f"  Voters:     [cyan]{args.voters}[/cyan]")
+    elif args.baseline == "debate":
+        console.print(f"  Rounds:     [cyan]{args.debate_rounds}[/cyan]")
+
     console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
     console.print()
 
+    cases  = get_cases(args.split, args.cases)
+    labels = task.labels
+
     logger = None
     if args.baseline == "mirror":
-        results = run_mirror(args, get_cases(args.split, args.cases),
-                             negative_label=task.labels[1])
+        results = run_mirror(args, cases, negative_label=labels[1])
+    elif args.baseline == "majority-rules":
+        results = run_majority_rules(args, cases, labels=labels)
+    elif args.baseline == "debate":
+        results = run_debate(args, cases, labels=labels)
     else:
         results, logger = run_courtroom(args)
 
