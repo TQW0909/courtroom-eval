@@ -68,9 +68,9 @@ def _parse_response(text: str) -> tuple[str, str]:
     decision  = decision_match.group(1).upper() if decision_match else None
     rationale = rationale_match.group(1).strip() if rationale_match else text.strip()
 
-    # If we couldn't parse a valid decision, default to CONTINUE
+    # If we couldn't parse a valid decision, default to CLOSE (matches judge design)
     if decision not in ("CONTINUE", "CLOSE"):
-        decision = "CONTINUE"
+        decision = "CLOSE"
 
     return decision, rationale
 

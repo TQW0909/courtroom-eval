@@ -205,15 +205,15 @@ def get_cases(split: str, n: int) -> list[dict]:
 # Metrics
 # ---------------------------------------------------------------------------
 
-def compute_metrics(results: list[dict]) -> dict:
+def compute_metrics(results: list[dict], positive_label: str = "harmful") -> dict:
     total = len(results)
     if total == 0:
         return {}
 
     correct = sum(1 for r in results if r["predicted"] == r["ground_truth"])
-    tp = sum(1 for r in results if r["predicted"] == "harmful" and r["ground_truth"] == "harmful")
-    fp = sum(1 for r in results if r["predicted"] == "harmful" and r["ground_truth"] == "benign")
-    fn = sum(1 for r in results if r["predicted"] == "benign"    and r["ground_truth"] == "harmful")
+    tp = sum(1 for r in results if r["predicted"] == positive_label and r["ground_truth"] == positive_label)
+    fp = sum(1 for r in results if r["predicted"] == positive_label and r["ground_truth"] != positive_label)
+    fn = sum(1 for r in results if r["predicted"] != positive_label and r["ground_truth"] == positive_label)
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -289,45 +289,12 @@ def print_token_summary(totals: dict):
 # Main
 # ---------------------------------------------------------------------------
 
-def run_courtroom(args, cases: list[dict]) -> list[dict]:
-    graph = build_components(args.model, args.jury_model, args.max_rounds)
-
-    args = parse_args()
-
-    # --- Resolve task ---
+def run_courtroom(args) -> tuple[list[dict], "RunLogger | None"]:
     task = TASKS[args.task]
-
-    # --- Header ---
-    console.print()
-    console.print(Rule("[bold white]Courtroom Eval[/bold white]", style="white"))
-    console.print(f"  Task:       [cyan]{task.name}[/cyan] — {task.description}")
-    console.print(f"  Labels:     [cyan]{task.labels[0]}[/cyan] / [cyan]{task.labels[1]}[/cyan]")
-    console.print(f"  Model:      [cyan]{args.model}[/cyan]")
-    console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
-    console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
-    console.print(f"  Jurors:     [cyan]{args.jurors}[/cyan]")
-
-    ablation_flags = []
-    if args.no_filter:
-        ablation_flags.append("no-filter")
-    if args.no_defense:
-        ablation_flags.append("no-defense")
-    if ablation_flags:
-        console.print(f"  Ablation:   [yellow]{', '.join(ablation_flags)}[/yellow]")
-    if args.log:
-        console.print(f"  Logging to: [dim]{args.log}[/dim]")
-    console.print()
-
-    # --- Token tracker ---
     tracker = TokenTracker()
-
-    # --- Build graph ---
     graph = build_components(args, tracker, task)
-
-    # --- Load data ---
     cases = get_cases(args.split, args.cases)
 
-    # --- Run logger (optional) ---
     run_config = {
         "task": task.name,
         "labels": list(task.labels),
@@ -342,13 +309,12 @@ def run_courtroom(args, cases: list[dict]) -> list[dict]:
     }
     logger = RunLogger(args.log, config=run_config) if args.log else None
 
-    # --- Evaluate ---
     results = []
 
     for i, case in enumerate(cases):
         console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
 
-        tracker.reset()  # fresh token counts per case
+        tracker.reset()
 
         state = initial_state(
             case["response"],
@@ -367,12 +333,13 @@ def run_courtroom(args, cases: list[dict]) -> list[dict]:
                 if final_state is None:
                     raise RuntimeError("Graph stream produced no updates")
                 predicted = final_state["final_verdict"]
-                print_live_epilogue(final_state, ground_truth=case["label"])
+                print_live_epilogue(final_state, ground_truth=case["label"],
+                                    positive_label=task.labels[0], negative_label=task.labels[1])
             else:
                 final_state = graph.invoke(state)
                 predicted = final_state["final_verdict"]
 
-                verdict_color = "bold red" if predicted and predicted.lower() == "harmful" else "bold green"
+                verdict_color = "bold red" if predicted and predicted.lower() == task.labels[0].lower() else "bold green"
                 correct = "✓" if predicted and predicted.lower() == case["label"] else "✗"
                 console.print(
                     f"  [{verdict_color}]{predicted or 'NO VERDICT':>8}[/{verdict_color}]  "
@@ -382,8 +349,8 @@ def run_courtroom(args, cases: list[dict]) -> list[dict]:
                 )
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
-            results.append({
-                "predicted":    "benign",
+            result = {
+                "predicted":    task.labels[1],
                 "ground_truth": case["label"],
                 "error":        str(e),
                 "token_usage":  tracker.summary(),
@@ -393,24 +360,22 @@ def run_courtroom(args, cases: list[dict]) -> list[dict]:
                 logger.add_case(result)
             continue
 
-        token_usage = tracker.summary()
-
         result = {
             "predicted":          predicted,
             "ground_truth":       case["label"],
             "confidence":         final_state.get("verdict_confidence"),
             "rounds":             final_state.get("round"),
             "grounding_failures": final_state.get("grounding_failures", 0),
-            "token_usage":        token_usage,
+            "token_usage":        tracker.summary(),
         }
         results.append(result)
         if logger:
             logger.add_case(result)
 
-    return results
+    return results, logger
 
 
-def run_mirror(args, cases: list[dict]) -> list[dict]:
+def run_mirror(args, cases: list[dict], negative_label: str = "benign") -> list[dict]:
     model1 = get_model(args.model)
     model2 = get_model(args.jury_model or args.model)
     mirror = MirrorBaseline(
@@ -441,7 +406,7 @@ def run_mirror(args, cases: list[dict]) -> list[dict]:
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
             results.append({
-                "predicted":    "benign",
+                "predicted":    negative_label,
                 "ground_truth": case["label"],
                 "error":        str(e),
             })
@@ -464,24 +429,37 @@ def main():
     baseline_label = f"MIRROR (max {args.mirror_iterations} iters)" \
         if args.baseline == "mirror" else "Courtroom"
 
+    task = TASKS[args.task]
+
     console.print()
     console.print(Rule(f"[bold white]Courtroom Eval — {baseline_label}[/bold white]", style="white"))
+    console.print(f"  Task:       [cyan]{task.name}[/cyan] — {task.description}")
     console.print(f"  Model:      [cyan]{args.model}[/cyan]")
     if args.baseline == "courtroom":
         console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
+        console.print(f"  Jurors:     [cyan]{args.jurors}[/cyan]")
+        ablation_flags = []
+        if args.no_filter:
+            ablation_flags.append("no-filter")
+        if args.no_defense:
+            ablation_flags.append("no-defense")
+        if ablation_flags:
+            console.print(f"  Ablation:   [yellow]{', '.join(ablation_flags)}[/yellow]")
+        if args.log:
+            console.print(f"  Logging to: [dim]{args.log}[/dim]")
     else:
         console.print(f"  Max iters:  [cyan]{args.mirror_iterations}[/cyan]")
     console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
     console.print()
 
-    cases = get_cases(args.split, args.cases)
-
+    logger = None
     if args.baseline == "mirror":
-        results = run_mirror(args, cases)
+        results = run_mirror(args, get_cases(args.split, args.cases),
+                             negative_label=task.labels[1])
     else:
-        results = run_courtroom(args, cases)
+        results, logger = run_courtroom(args)
 
-    metrics = compute_metrics(results)
+    metrics = compute_metrics(results, positive_label=task.labels[0])
     print_metrics(metrics, args.model)
 
     # --- Token summary ---

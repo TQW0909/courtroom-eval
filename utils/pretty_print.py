@@ -105,9 +105,10 @@ def print_stream_update(node_name: str, state: dict) -> None:
         console.print(Rule(f"[dim]{escape(node_name)}[/dim]", style="dim"))
 
 
-def print_live_epilogue(state: dict, ground_truth: Optional[str] = None) -> None:
+def print_live_epilogue(state: dict, ground_truth: Optional[str] = None,
+                        positive_label: str = "harmful", negative_label: str = "benign") -> None:
     """Short footer after streaming: summary stats + optional label check."""
-    print_summary(state)
+    print_summary(state, positive_label=positive_label, negative_label=negative_label)
     if ground_truth is not None:
         predicted = state.get("final_verdict")
         match = predicted == ground_truth
@@ -190,7 +191,7 @@ def print_jury_verdict(state: dict):
     table.add_column("Confidence", width=12)
     table.add_column("Decisive Argument")
 
-    for i, vote in enumerate(state["jury_votes"]):
+    for i, vote in enumerate(state.get("jury_votes") or []):
         verdict = vote["verdict"]
         color = _verdict_color(verdict)
         table.add_row(
@@ -216,18 +217,18 @@ def print_jury_verdict(state: dict):
     ))
 
 
-def print_summary(state: dict):
+def print_summary(state: dict, positive_label: str = "harmful", negative_label: str = "benign"):
     console.print()
     console.print(Rule("[bold white]Summary[/bold white]", style="dim"))
 
     votes = state.get("jury_votes") or []
-    harmful_votes = sum(1 for v in votes if str(v.get("verdict", "")).lower() == "harmful")
+    positive_votes = sum(1 for v in votes if str(v.get("verdict", "")).lower() == positive_label.lower())
 
     console.print(f"  [dim]Rounds taken:[/dim]        {state['round']}")
     console.print(f"  [dim]Grounding failures:[/dim]  {state['grounding_failures']}")
     n = len(votes) or 3
-    console.print(f"  [dim]Jury split:[/dim]          {harmful_votes}-{n - harmful_votes} "
-                  f"({'harmful' if harmful_votes >= 2 else 'benign'})")
+    console.print(f"  [dim]Jury split:[/dim]          {positive_votes}-{n - positive_votes} "
+                  f"({positive_label if positive_votes >= 2 else negative_label})")
     decisions = state.get("judge_decisions") or []
     rationales = state.get("judge_rationales") or []
     decision_str = "  →  ".join(
@@ -238,7 +239,8 @@ def print_summary(state: dict):
     console.print()
 
 
-def print_full_result(state: dict, ground_truth: Optional[str] = None):
+def print_full_result(state: dict, ground_truth: Optional[str] = None,
+                      positive_label: str = "harmful", negative_label: str = "benign"):
     """Print the complete courtroom transcript for one case."""
     print_case_header(state)
 
@@ -247,7 +249,7 @@ def print_full_result(state: dict, ground_truth: Optional[str] = None):
         print_round(state, i)
 
     print_jury_verdict(state)
-    print_summary(state)
+    print_summary(state, positive_label=positive_label, negative_label=negative_label)
 
     # Ground truth comparison if available
     if ground_truth is not None:
