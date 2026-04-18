@@ -3,3 +3,5 @@
 *.pyc
 __pycache__/
 */settings.*
+test_*
+test.py

@@ -142,3 +142,16 @@ class CitationFilter:
     def validate_defense(self, state: dict) -> dict:
         """Node: validates the most recent defense argument."""
         return self._check(state, "defense_args")
+
+
+class NoOpFilter:
+    """
+    Pass-through filter for ablation studies (--no-filter).
+    Always passes — arguments are never dropped or retried.
+    """
+
+    def validate_prosecution(self, state: dict) -> dict:
+        return {**state, "last_filter_passed": True, "consecutive_failures": 0}
+
+    def validate_defense(self, state: dict) -> dict:
+        return {**state, "last_filter_passed": True, "consecutive_failures": 0}
