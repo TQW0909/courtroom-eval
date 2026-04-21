@@ -70,7 +70,7 @@ class RunLogger:
             "totals": totals,
         }
 
-        with open(self.path, "a") as f:
+        with open(self.path, "w") as f:
             f.write(json.dumps(record, default=str) + "\n")
 
         return record

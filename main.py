@@ -364,6 +364,8 @@ def run_courtroom(args) -> tuple[list[dict], "RunLogger | None"]:
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
             result = {
+                "prompt":       case.get("prompt", ""),
+                "response":     case["response"],
                 "predicted":    task.labels[1],
                 "ground_truth": case["label"],
                 "error":        str(e),
@@ -375,6 +377,8 @@ def run_courtroom(args) -> tuple[list[dict], "RunLogger | None"]:
             continue
 
         result = {
+            "prompt":             case.get("prompt", ""),
+            "response":           case["response"],
             "predicted":          predicted,
             "ground_truth":       case["label"],
             "confidence":         final_state.get("verdict_confidence"),
@@ -389,19 +393,32 @@ def run_courtroom(args) -> tuple[list[dict], "RunLogger | None"]:
     return results, logger
 
 
-def run_mirror(args, cases: list[dict], negative_label: str = "benign") -> list[dict]:
-    model1 = get_model(args.model)
-    model2 = get_model(args.jury_model or args.model)
+def run_mirror(args, cases: list[dict],
+               negative_label: str = "benign") -> tuple[list[dict], "RunLogger | None"]:
+    tracker = TokenTracker()
+    model1 = get_model(args.model, callbacks=[tracker])
+    model2 = get_model(args.jury_model or args.model, callbacks=[tracker])
     mirror = MirrorBaseline(
         model1=model1,
         model2=model2,
         max_iterations=args.mirror_iterations,
         verbose=args.verbose,
     )
+
+    run_config = {
+        "baseline":         "mirror",
+        "model":            args.model,
+        "evaluator2_model": args.jury_model or args.model,
+        "max_iterations":   args.mirror_iterations,
+        "cases_requested":  args.cases,
+        "split":            args.split,
+    }
+    logger = RunLogger(args.log, config=run_config) if args.log else None
     results = []
 
     for i, case in enumerate(cases):
         console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
+        tracker.reset()
 
         try:
             outcome = mirror.classify(
@@ -419,35 +436,59 @@ def run_mirror(args, cases: list[dict], negative_label: str = "benign") -> list[
                 )
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
-            results.append({
+            result = {
+                "prompt":       case.get("prompt", ""),
+                "response":     case["response"],
                 "predicted":    negative_label,
                 "ground_truth": case["label"],
                 "error":        str(e),
-            })
+                "token_usage":  tracker.summary(),
+            }
+            results.append(result)
+            if logger:
+                logger.add_case(result)
             continue
 
-        results.append({
+        result = {
+            "prompt":       case.get("prompt", ""),
+            "response":     case["response"],
             "predicted":    predicted,
             "ground_truth": case["label"],
             "confidence":   outcome["confidence"],
             "iterations":   outcome["iterations"],
             "converged":    outcome["converged"],
-        })
+            "history":      outcome["history"],
+            "token_usage":  tracker.summary(),
+        }
+        results.append(result)
+        if logger:
+            logger.add_case(result)
 
-    return results
+    return results, logger
 
 
 def run_majority_rules(args, cases: list[dict],
-                        labels: tuple[str, str] = ("harmful", "benign")) -> list[dict]:
-    model = get_model(args.model)
+                       labels: tuple[str, str] = ("harmful", "benign")) -> tuple[list[dict], "RunLogger | None"]:
+    tracker = TokenTracker()
+    model = get_model(args.model, callbacks=[tracker])
     majority = MajorityRulesBaseline(
         models=[model] * args.voters,
         verbose=args.verbose,
     )
+
+    run_config = {
+        "baseline":        "majority-rules",
+        "model":           args.model,
+        "voters":          args.voters,
+        "cases_requested": args.cases,
+        "split":           args.split,
+    }
+    logger = RunLogger(args.log, config=run_config) if args.log else None
     results = []
 
     for i, case in enumerate(cases):
         console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
+        tracker.reset()
 
         try:
             outcome = majority.classify(
@@ -465,36 +506,60 @@ def run_majority_rules(args, cases: list[dict],
                 )
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
-            results.append({
+            result = {
+                "prompt":       case.get("prompt", ""),
+                "response":     case["response"],
                 "predicted":    labels[1],
                 "ground_truth": case["label"],
                 "error":        str(e),
-            })
+                "token_usage":  tracker.summary(),
+            }
+            results.append(result)
+            if logger:
+                logger.add_case(result)
             continue
 
-        results.append({
-            "predicted":    predicted,
-            "ground_truth": case["label"],
-            "confidence":   outcome["confidence"],
+        result = {
+            "prompt":         case.get("prompt", ""),
+            "response":       case["response"],
+            "predicted":      predicted,
+            "ground_truth":   case["label"],
+            "confidence":     outcome["confidence"],
             "positive_votes": outcome["positive_votes"],
-            "total_voters": outcome["total_voters"],
-        })
+            "total_voters":   outcome["total_voters"],
+            "votes":          outcome["votes"],
+            "token_usage":    tracker.summary(),
+        }
+        results.append(result)
+        if logger:
+            logger.add_case(result)
 
-    return results
+    return results, logger
 
 
 def run_debate(args, cases: list[dict],
-               labels: tuple[str, str] = ("harmful", "benign")) -> list[dict]:
-    model = get_model(args.model)
+               labels: tuple[str, str] = ("harmful", "benign")) -> tuple[list[dict], "RunLogger | None"]:
+    tracker = TokenTracker()
+    model = get_model(args.model, callbacks=[tracker])
     debate = MultiAgentDebateBaseline(
         model=model,
         debate_rounds=args.debate_rounds,
         verbose=args.verbose,
     )
+
+    run_config = {
+        "baseline":        "debate",
+        "model":           args.model,
+        "debate_rounds":   args.debate_rounds,
+        "cases_requested": args.cases,
+        "split":           args.split,
+    }
+    logger = RunLogger(args.log, config=run_config) if args.log else None
     results = []
 
     for i, case in enumerate(cases):
         console.print(f"[dim]Case {i + 1}/{len(cases)}[/dim]")
+        tracker.reset()
 
         try:
             outcome = debate.classify(
@@ -512,22 +577,37 @@ def run_debate(args, cases: list[dict],
                 )
         except Exception as e:
             console.print(f"  [bold red]ERROR:[/bold red] {e}")
-            results.append({
+            result = {
+                "prompt":       case.get("prompt", ""),
+                "response":     case["response"],
                 "predicted":    labels[1],
                 "ground_truth": case["label"],
                 "error":        str(e),
-            })
+                "token_usage":  tracker.summary(),
+            }
+            results.append(result)
+            if logger:
+                logger.add_case(result)
             continue
 
-        results.append({
-            "predicted":    predicted,
-            "ground_truth": case["label"],
-            "confidence":   outcome["confidence"],
-            "rounds":       outcome["rounds"],
-            "judge_reason": outcome["judge_reason"],
-        })
+        result = {
+            "prompt":            case.get("prompt", ""),
+            "response":          case["response"],
+            "predicted":         predicted,
+            "ground_truth":      case["label"],
+            "confidence":        outcome["confidence"],
+            "rounds":            outcome["rounds"],
+            "judge_reason":      outcome["judge_reason"],
+            "judge_raw_output":  outcome["judge_raw_output"],
+            "critic_args":       outcome["critic_args"],
+            "defender_args":     outcome["defender_args"],
+            "token_usage":       tracker.summary(),
+        }
+        results.append(result)
+        if logger:
+            logger.add_case(result)
 
-    return results
+    return results, logger
 
 
 def main():
@@ -558,8 +638,6 @@ def main():
             ablation_flags.append("no-defense")
         if ablation_flags:
             console.print(f"  Ablation:   [yellow]{', '.join(ablation_flags)}[/yellow]")
-        if args.log:
-            console.print(f"  Logging to: [dim]{args.log}[/dim]")
     elif args.baseline == "mirror":
         console.print(f"  Max iters:  [cyan]{args.mirror_iterations}[/cyan]")
     elif args.baseline == "majority-rules":
@@ -567,19 +645,20 @@ def main():
     elif args.baseline == "debate":
         console.print(f"  Rounds:     [cyan]{args.debate_rounds}[/cyan]")
 
+    if args.log:
+        console.print(f"  Logging to: [dim]{args.log}[/dim]")
     console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
     console.print()
 
     cases  = get_cases(args.split, args.cases)
     labels = task.labels
 
-    logger = None
     if args.baseline == "mirror":
-        results = run_mirror(args, cases, negative_label=labels[1])
+        results, logger = run_mirror(args, cases, negative_label=labels[1])
     elif args.baseline == "majority-rules":
-        results = run_majority_rules(args, cases, labels=labels)
+        results, logger = run_majority_rules(args, cases, labels=labels)
     elif args.baseline == "debate":
-        results = run_debate(args, cases, labels=labels)
+        results, logger = run_debate(args, cases, labels=labels)
     else:
         results, logger = run_courtroom(args)
 
@@ -587,7 +666,6 @@ def main():
     print_metrics(metrics, args.model)
 
     # --- Token summary ---
-    # Aggregate token usage across all cases
     all_totals = {
         "total_input_tokens": 0,
         "total_output_tokens": 0,

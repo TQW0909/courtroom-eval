@@ -76,6 +76,7 @@ def _parse_vote(text: str, labels: tuple[str, str]) -> dict:
         "verdict":    verdict_match.group(1).lower() if verdict_match else label1,
         "confidence": float(confidence_match.group(1)) if confidence_match else 0.5,
         "reason":     reason_match.group(1).strip() if reason_match else "No reason provided.",
+        "raw_output": text,
     }
 
 

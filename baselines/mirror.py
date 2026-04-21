@@ -122,6 +122,7 @@ def _parse_assessment(text: str) -> dict:
         "confidence": float(confidence_match.group(1)) if confidence_match else 0.5,
         "strengths":  strengths_match.group(1).strip() if strengths_match  else "None identified.",
         "flaws":      flaws_match.group(1).strip()     if flaws_match      else "None identified.",
+        "raw_output": text,
     }
 
 

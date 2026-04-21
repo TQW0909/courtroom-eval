@@ -205,6 +205,7 @@ def _parse_verdict(text: str, labels: tuple[str, str]) -> dict:
         "verdict":    verdict_match.group(1).lower() if verdict_match else label1,
         "confidence": float(confidence_match.group(1)) if confidence_match else 0.5,
         "reason":     reason_match.group(1).strip() if reason_match else "No reason provided.",
+        "raw_output": text,
     }
 
 
@@ -351,10 +352,11 @@ class MultiAgentDebateBaseline:
                   f"(conf={result['confidence']:.2f})  — {result['reason']}")
 
         return {
-            "verdict":       result["verdict"],
-            "confidence":    result["confidence"],
-            "rounds":        self.debate_rounds,
-            "critic_args":   critic_args,
-            "defender_args": defender_args,
-            "judge_reason":  result["reason"],
+            "verdict":            result["verdict"],
+            "confidence":         result["confidence"],
+            "rounds":             self.debate_rounds,
+            "critic_args":        critic_args,
+            "defender_args":      defender_args,
+            "judge_reason":       result["reason"],
+            "judge_raw_output":   result["raw_output"],
         }
