@@ -7,6 +7,11 @@
 #   python main.py --model gpt-4o --cases 20 --max-rounds 4
 #   python main.py --model llama3:8b-instruct-q4_K_M --split test --cases 5
 #
+# Per-role model selection:
+#   python main.py --prosecutor-model gpt-4o --defender-model gpt-4o \
+#                  --judge-model gpt-4o-mini --jury-model gpt-4o-mini --cases 10
+#   python main.py --model llama3:8b-instruct-q4_K_M --jury-model gpt-4o-mini --cases 10
+#
 # Ablation examples:
 #   python main.py --model llama3:8b-instruct-q4_K_M --no-filter --cases 10
 #   python main.py --model gpt-4o-mini --no-defense --cases 10
@@ -51,14 +56,26 @@ from rich import box
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the Courtroom Eval pipeline on JBB.")
 
-    # Model selection
+    # Model selection — per-role overrides all fall back to --model
     parser.add_argument(
         "--model", default="gpt-4o-mini",
-        help="Model name to use for all agents (default: gpt-4o-mini)"
+        help="Default model for all agents (default: gpt-4o-mini)"
     )
     parser.add_argument(
-        "--jury-model", default=None,
-        help="Separate model for jurors. Falls back to --model if not set."
+        "--prosecutor-model", default=None, metavar="MODEL",
+        help="Model for prosecution agent (falls back to --model)"
+    )
+    parser.add_argument(
+        "--defender-model", default=None, metavar="MODEL",
+        help="Model for defense agent (falls back to --model)"
+    )
+    parser.add_argument(
+        "--judge-model", default=None, metavar="MODEL",
+        help="Model for judge agent (falls back to --model)"
+    )
+    parser.add_argument(
+        "--jury-model", default=None, metavar="MODEL",
+        help="Model for juror agents (falls back to --model)"
     )
 
     # Task selection
@@ -112,6 +129,11 @@ def parse_args():
 # Build components
 # ---------------------------------------------------------------------------
 
+def _resolve_model(role_model: str | None, default: str) -> str:
+    """Return the per-role model name, falling back to the default."""
+    return role_model if role_model else default
+
+
 def build_components(args, tracker: TokenTracker, task: TaskConfig):
     """
     Build the LangGraph pipeline from CLI args.
@@ -119,21 +141,27 @@ def build_components(args, tracker: TokenTracker, task: TaskConfig):
     The TokenTracker callback is attached to every model so that token usage
     and latency are captured automatically on every LLM call.
     The TaskConfig is passed to every agent so prompts adapt to the task.
+
+    Per-role model overrides:
+      --prosecutor-model, --defender-model, --judge-model, --jury-model
+    All fall back to --model when not specified.
     """
     callbacks = [tracker]
 
-    model      = get_model(args.model, callbacks=callbacks)
-    jury_model = get_model(args.jury_model or args.model, callbacks=callbacks)
+    prosecutor_model = get_model(_resolve_model(args.prosecutor_model, args.model), callbacks=callbacks)
+    defender_model   = get_model(_resolve_model(args.defender_model,   args.model), callbacks=callbacks)
+    judge_model      = get_model(_resolve_model(args.judge_model,     args.model), callbacks=callbacks)
+    jury_model       = get_model(_resolve_model(args.jury_model,      args.model), callbacks=callbacks)
 
-    prosecutor = Prosecutor(model=model, task=task)
-    judge      = Judge(model=model, max_rounds=args.max_rounds)
+    prosecutor = Prosecutor(model=prosecutor_model, task=task)
+    judge      = Judge(model=judge_model, max_rounds=args.max_rounds)
     jury       = Jury(models=[jury_model] * args.jurors, task=task)
 
     # Ablation: defense
     if args.no_defense:
         defender = _StubDefender()
     else:
-        defender = Defender(model=model, task=task)
+        defender = Defender(model=defender_model, task=task)
 
     # Ablation: citation filter
     if args.no_filter:
@@ -289,9 +317,22 @@ def main():
     # --- Header ---
     console.print()
     console.print(Rule("[bold white]Courtroom Eval[/bold white]", style="white"))
+    # Resolve per-role model names for display
+    p_model = _resolve_model(args.prosecutor_model, args.model)
+    d_model = _resolve_model(args.defender_model,   args.model)
+    j_model = _resolve_model(args.judge_model,      args.model)
+    jr_model = _resolve_model(args.jury_model,       args.model)
+    all_same = len({p_model, d_model, j_model, jr_model}) == 1
+
     console.print(f"  Task:       [cyan]{task.name}[/cyan] — {task.description}")
     console.print(f"  Labels:     [cyan]{task.labels[0]}[/cyan] / [cyan]{task.labels[1]}[/cyan]")
-    console.print(f"  Model:      [cyan]{args.model}[/cyan]")
+    if all_same:
+        console.print(f"  Model:      [cyan]{args.model}[/cyan]  (all agents)")
+    else:
+        console.print(f"  Prosecutor: [cyan]{p_model}[/cyan]")
+        console.print(f"  Defender:   [cyan]{d_model}[/cyan]")
+        console.print(f"  Judge:      [cyan]{j_model}[/cyan]")
+        console.print(f"  Jury:       [cyan]{jr_model}[/cyan]")
     console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
     console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
     console.print(f"  Jurors:     [cyan]{args.jurors}[/cyan]")
@@ -321,7 +362,10 @@ def main():
         "task": task.name,
         "labels": list(task.labels),
         "model": args.model,
-        "jury_model": args.jury_model or args.model,
+        "prosecutor_model": p_model,
+        "defender_model": d_model,
+        "judge_model": j_model,
+        "jury_model": jr_model,
         "max_rounds": args.max_rounds,
         "jurors": args.jurors,
         "cases_requested": args.cases,
