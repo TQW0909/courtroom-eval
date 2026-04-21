@@ -25,6 +25,7 @@ class CourtroomState(TypedDict):
     grounding_failures: int         # total filter failures across the whole trial (for reporting)
     consecutive_failures: int       # failures in the current turn only — resets to 0 on any pass
     last_filter_passed: bool        # set by citation filter each turn
+    filter_feedback: str            # rejection reason from citation filter — shown to agent on retry
 
 
 # ---------------------------------------------------------------------------
@@ -181,5 +182,6 @@ def initial_state(case: str, max_rounds: int = 4, case_prompt: str = "") -> Cour
         grounding_failures=0,
         consecutive_failures=0,
         last_filter_passed=True,
+        filter_feedback="",
         judge_rationales=[],
     )

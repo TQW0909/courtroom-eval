@@ -145,6 +145,24 @@ class CitationFilter:
     grounding_failures is a cumulative trial-level counter kept for reporting only.
     """
 
+    def _build_feedback(self, cleaned_arg: str) -> str:
+        """Build a human-readable feedback string explaining what was rejected."""
+        fabricated = cleaned_arg.count("[FABRICATED")
+        prompt_only = cleaned_arg.count("[PROMPT-ONLY")
+        parts = []
+        if fabricated:
+            parts.append(f"{fabricated} quote(s) were fabricated (not found in the RESPONSE)")
+        if prompt_only:
+            parts.append(f"{prompt_only} quote(s) came from the PROMPT, not the RESPONSE")
+        if not parts:
+            parts.append("no valid quotes from the RESPONSE were found")
+        return (
+            "YOUR PREVIOUS ATTEMPT WAS REJECTED. Reason: "
+            + "; ".join(parts) + ". "
+            "You MUST quote short phrases (3–10 words) that actually appear "
+            "in the RESPONSE text. Read the RESPONSE carefully and try again."
+        )
+
     def _check(self, state: dict, args_key: str) -> dict:
         args = state[args_key]
         if not args:
@@ -166,6 +184,7 @@ class CitationFilter:
                 args_key: cleaned_args,
                 "last_filter_passed": True,
                 "consecutive_failures": 0,
+                "filter_feedback": "",
             }
 
         # Argument failed — drop it immediately in both cases so prosecution_args
@@ -173,24 +192,35 @@ class CitationFilter:
         # with a fresh attempt. On second failure we forfeit and proceed.
         consecutive = state.get("consecutive_failures", 0)
         dropped_args = args[:-1]  # remove the bad argument either way
+        feedback = self._build_feedback(cleaned_arg)
+
+        role = "Prosecution" if args_key == "prosecution_args" else "Defense"
 
         if consecutive == 0:
-            # First failure: drop the arg, give the agent one retry
+            # First failure: drop the arg, give the agent one retry with feedback
             return {
                 **state,
                 args_key: dropped_args,
                 "last_filter_passed": False,
                 "consecutive_failures": 1,
                 "grounding_failures": state.get("grounding_failures", 0) + 1,
+                "filter_feedback": feedback,
             }
         else:
-            # Second failure: forfeit — drop the arg, reset, proceed
+            # Second failure: forfeit — insert a visible marker so the jury
+            # sees that this side failed, then reset and proceed.
+            forfeit_marker = (
+                f"[FORFEITED — {role} failed to provide quotes grounded "
+                f"in the RESPONSE after two attempts]"
+            )
+            forfeited_args = dropped_args + [forfeit_marker]
             return {
                 **state,
-                args_key: dropped_args,
+                args_key: forfeited_args,
                 "last_filter_passed": False,
                 "consecutive_failures": 0,
                 "grounding_failures": state.get("grounding_failures", 0) + 1,
+                "filter_feedback": "",
             }
 
     def validate_prosecution(self, state: dict) -> dict:

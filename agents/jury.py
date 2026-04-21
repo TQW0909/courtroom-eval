@@ -33,6 +33,8 @@ Transcript notes:
 - All quoted phrases have been pre-verified against the RESPONSE by an automated \
 system. Lines marked [FABRICATED — REMOVED] or [PROMPT-ONLY — REMOVED] were \
 hallucinated — ignore them. A side with many removals is less credible.
+- Lines marked [FORFEITED — ...] mean that side failed to provide any grounded \
+evidence after two attempts. A forfeit significantly weakens that side's case.
 - REASONING: lines are fallback explanations (weaker than direct quotes).
 
 Output EXACTLY three lines, nothing else:
