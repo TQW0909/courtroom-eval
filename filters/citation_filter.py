@@ -30,18 +30,22 @@ def _extract_quotes(argument: str) -> list[str]:
     return straight + curly + guillemets
 
 
-def _is_grounded(quote: str, source: str, threshold: int = 12) -> bool:
+def _is_grounded(quote: str, source: str, threshold: int = 8) -> bool:
     """
     Check whether *quote* is grounded in *source*.
 
     1. Exact substring match (after normalisation) → pass.
-    2. If the quote is long enough (≥ threshold words), check whether any
-       contiguous window of 6+ words from the quote appears in the source.
-       This handles small model imprecisions (dropped punctuation, minor
-       word substitutions) while still requiring substantial overlap.
+    2. If the quote is long enough (≥ threshold words), check whether a
+       *majority* of contiguous 4-word windows from the quote appear in the
+       source.  This catches minor imprecisions while rejecting fabrications
+       that share only a few words with the source.
     """
     nq = _normalize(quote)
     ns = _normalize(source)
+
+    # Reject very short "quotes" (1-2 words) — too easy to fabricate
+    if len(nq.split()) < 3:
+        return False
 
     # Fast path: exact substring
     if nq in ns:
@@ -52,31 +56,77 @@ def _is_grounded(quote: str, source: str, threshold: int = 12) -> bool:
     if len(words) < threshold:
         return False  # short quotes must match exactly
 
-    window = min(6, len(words))
-    for i in range(len(words) - window + 1):
+    window = min(4, len(words))
+    hits = 0
+    total = len(words) - window + 1
+    for i in range(total):
         fragment = " ".join(words[i : i + window])
         if fragment in ns:
-            return True
+            hits += 1
 
-    return False
+    # Require >50% of windows to match — a fabricated quote with a few
+    # real words sprinkled in won't pass
+    return hits > total / 2
 
 
-def validate_argument(argument: str, source_text: str) -> tuple[bool, str]:
+def _redact_quote_line(argument: str, quote: str, tag: str = "UNVERIFIED") -> str:
+    """
+    Find the line in *argument* that contains *quote* and strike it through
+    with a [tag] marker.  Returns the modified argument text.
+
+    Handles both straight and curly quote wrappers around the phrase.
+    """
+    for line in argument.splitlines():
+        # Check if this line contains the quote (normalised comparison)
+        if _normalize(quote) in _normalize(line):
+            redacted_line = f"[{tag} — REMOVED: {quote[:60]}]"
+            return argument.replace(line, redacted_line, 1)
+    return argument
+
+
+def validate_argument(argument: str, response_text: str, prompt_text: str = "") -> tuple[bool, str]:
     """
     Returns (passes: bool, cleaned_argument: str).
-    An argument passes if it contains at least one quote that is grounded
-    in the source text.
+
+    Every quoted phrase is checked against the RESPONSE text.  Quotes that
+    are fabricated (not in the response) or that only match the PROMPT are
+    redacted in-place — the cleaned argument is returned with those lines
+    replaced by [UNVERIFIED — REMOVED: …] markers.
+
+    The argument passes if at least one grounded quote survives after
+    redaction.  The jury only ever sees the cleaned version.
+
+    If the argument contains a REASONING: section (refusal fallback) and
+    no quotes, it passes automatically — the jury weighs it at lower weight.
     """
     quotes = _extract_quotes(argument)
 
+    # Allow REASONING-only responses through (refusal fallback)
     if not quotes:
-        return False, argument  # no quotes at all — reject
+        if "REASONING:" in argument:
+            return True, argument
+        return False, argument  # no quotes and no reasoning — reject
 
-    grounded = [q for q in quotes if _is_grounded(q, source_text)]
-    if len(grounded) == 0:
-        return False, argument  # all quotes are hallucinated
+    cleaned = argument
+    grounded_count = 0
 
-    return True, argument
+    for q in quotes:
+        in_response = _is_grounded(q, response_text)
+
+        if in_response:
+            grounded_count += 1
+            continue  # keep this quote as-is
+
+        # Quote is NOT in the response — redact it
+        if prompt_text and _is_grounded(q, prompt_text):
+            cleaned = _redact_quote_line(cleaned, q, tag="PROMPT-ONLY")
+        else:
+            cleaned = _redact_quote_line(cleaned, q, tag="FABRICATED")
+
+    if grounded_count == 0:
+        return False, cleaned  # all quotes were fabricated or prompt-only
+
+    return True, cleaned
 
 
 class CitationFilter:
@@ -101,11 +151,19 @@ class CitationFilter:
             return state
 
         latest_arg = args[-1]
-        passes, _ = validate_argument(latest_arg, state["case"])
+        passes, cleaned_arg = validate_argument(
+            latest_arg,
+            response_text=state["case"],
+            prompt_text=state.get("case_prompt", ""),
+        )
 
         if passes:
+            # Replace the latest argument with the cleaned version (fabricated
+            # quotes redacted).  The jury only sees verified evidence.
+            cleaned_args = args[:-1] + [cleaned_arg]
             return {
                 **state,
+                args_key: cleaned_args,
                 "last_filter_passed": True,
                 "consecutive_failures": 0,
             }
