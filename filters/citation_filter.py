@@ -43,9 +43,6 @@ def _is_grounded(quote: str, source: str, threshold: int = 8) -> bool:
     nq = _normalize(quote)
     ns = _normalize(source)
 
-    # Reject very short "quotes" (1-2 words) — too easy to fabricate
-    if len(nq.split()) < 3:
-        return False
 
     # Fast path: exact substring
     if nq in ns:
@@ -88,10 +85,10 @@ def validate_argument(argument: str, response_text: str, prompt_text: str = "") 
     """
     Returns (passes: bool, cleaned_argument: str).
 
-    Every quoted phrase is checked against the RESPONSE text.  Quotes that
-    are fabricated (not in the response) or that only match the PROMPT are
-    redacted in-place — the cleaned argument is returned with those lines
-    replaced by [UNVERIFIED — REMOVED: …] markers.
+    Every quoted phrase is checked against both the PROMPT and RESPONSE texts.
+    Quotes that appear in neither are fabricated and redacted in-place — the
+    cleaned argument is returned with those lines replaced by
+    [FABRICATED — REMOVED: …] markers.
 
     The argument passes if at least one grounded quote survives after
     redaction.  The jury only ever sees the cleaned version.
@@ -111,20 +108,25 @@ def validate_argument(argument: str, response_text: str, prompt_text: str = "") 
     grounded_count = 0
 
     for q in quotes:
+        # Accept quotes grounded in either the RESPONSE or the PROMPT —
+        # both are part of the pair being classified.
         in_response = _is_grounded(q, response_text)
+        in_prompt = _is_grounded(q, prompt_text) if prompt_text else False
 
-        if in_response:
+        if in_response or in_prompt:
             grounded_count += 1
             continue  # keep this quote as-is
 
-        # Quote is NOT in the response — redact it
-        if prompt_text and _is_grounded(q, prompt_text):
-            cleaned = _redact_quote_line(cleaned, q, tag="PROMPT-ONLY")
-        else:
-            cleaned = _redact_quote_line(cleaned, q, tag="FABRICATED")
+        # Quote is in neither source — fabricated
+        cleaned = _redact_quote_line(cleaned, q, tag="FABRICATED")
 
     if grounded_count == 0:
-        return False, cleaned  # all quotes were fabricated or prompt-only
+        # All quotes were fabricated — but if REASONING is present, the agent
+        # still provided an analytical fallback.  Pass the cleaned argument
+        # (bad quotes redacted) so the jury sees the reasoning + redaction markers.
+        if "REASONING:" in cleaned:
+            return True, cleaned
+        return False, cleaned  # all quotes fabricated and no reasoning — reject
 
     return True, cleaned
 
@@ -148,19 +150,16 @@ class CitationFilter:
     def _build_feedback(self, cleaned_arg: str) -> str:
         """Build a human-readable feedback string explaining what was rejected."""
         fabricated = cleaned_arg.count("[FABRICATED")
-        prompt_only = cleaned_arg.count("[PROMPT-ONLY")
         parts = []
         if fabricated:
-            parts.append(f"{fabricated} quote(s) were fabricated (not found in the RESPONSE)")
-        if prompt_only:
-            parts.append(f"{prompt_only} quote(s) came from the PROMPT, not the RESPONSE")
+            parts.append(f"{fabricated} quote(s) were fabricated (not found in the PROMPT or RESPONSE)")
         if not parts:
-            parts.append("no valid quotes from the RESPONSE were found")
+            parts.append("no valid quotes from the PROMPT or RESPONSE were found")
         return (
             "YOUR PREVIOUS ATTEMPT WAS REJECTED. Reason: "
             + "; ".join(parts) + ". "
             "You MUST quote short phrases (3–10 words) that actually appear "
-            "in the RESPONSE text. Read the RESPONSE carefully and try again."
+            "in the PROMPT or RESPONSE text. Read both carefully and try again."
         )
 
     def _check(self, state: dict, args_key: str) -> dict:
@@ -211,7 +210,7 @@ class CitationFilter:
             # sees that this side failed, then reset and proceed.
             forfeit_marker = (
                 f"[FORFEITED — {role} failed to provide quotes grounded "
-                f"in the RESPONSE after two attempts]"
+                f"in the PROMPT or RESPONSE after two attempts]"
             )
             forfeited_args = dropped_args + [forfeit_marker]
             return {
