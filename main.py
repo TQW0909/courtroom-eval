@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import get_model
-from tasks import TASKS, DEFAULT_TASK, TaskConfig
+from tasks import TASKS, DEFAULT_TASK, DATASET_DEFAULT_TASKS, TaskConfig
 from agents.prosecutor import Prosecutor
 from agents.defender import Defender
 from agents.judge import Judge
@@ -35,6 +35,7 @@ from agents.jury import Jury
 from filters.citation_filter import CitationFilter, NoOpFilter
 from graph.courtroom_graph import build_courtroom_graph, initial_state
 from data.jbb_loader import load_jbb
+from data.halueval_loader import get_halueval_cases
 from utils.token_tracker import TokenTracker
 from utils.run_logger import RunLogger
 from utils.pretty_print import (
@@ -80,8 +81,9 @@ def parse_args():
 
     # Task selection
     parser.add_argument(
-        "--task", default=DEFAULT_TASK, choices=list(TASKS.keys()),
-        help=f"Evaluation task (default: {DEFAULT_TASK}). Available: {', '.join(TASKS.keys())}"
+        "--task", default=None, choices=list(TASKS.keys()),
+        help=("Evaluation task. If omitted, auto-selected from --dataset via "
+              f"DATASET_DEFAULT_TASKS. Available: {', '.join(TASKS.keys())}")
     )
 
     # Pipeline parameters
@@ -94,8 +96,13 @@ def parse_args():
         help="Number of cases to evaluate (default: 10)"
     )
     parser.add_argument(
+        "--dataset", default="jbb", choices=["jbb", "halueval"],
+        help="Source dataset (default: jbb). 'halueval' loads the "
+             "summarization_samples subset and pairs naturally with --task factual-accuracy."
+    )
+    parser.add_argument(
         "--split", default="test", choices=["train", "test"],
-        help="JBB dataset split to use (default: test)"
+        help="JBB dataset split to use (default: test). Ignored for halueval."
     )
     parser.add_argument(
         "--jurors", type=int, default=3,
@@ -187,15 +194,19 @@ class _StubDefender:
 # Dataset helpers
 # ---------------------------------------------------------------------------
 
-def get_cases(split: str, n: int) -> list[dict]:
+def get_cases(dataset: str, split: str, n: int) -> list[dict]:
     """
     Returns a list of dicts with keys:
-      - 'response' (str): the AI-generated response (Target field from JBB behaviors)
-      - 'prompt'   (str): the original user goal / jailbreak prompt (Goal field)
-      - 'label'    (str): ground-truth label — 'harmful' or 'benign'
+      - 'response' (str): the AI-generated text under review
+      - 'prompt'   (str): the original user prompt / instruction
+      - 'label'    (str): ground-truth label (task-specific)
 
-    Uses the JBB behaviors split which has harmful and benign cases.
+    Dispatches on `dataset`. JBB → harmful/benign jailbreak cases.
+    HaluEval → inaccurate/accurate summarization cases.
     """
+    if dataset == "halueval":
+        return get_halueval_cases(n)
+
     behaviors, _ = load_jbb()
     harmful_cases = behaviors["harmful"]
     benign_cases  = behaviors["benign"]
@@ -224,15 +235,17 @@ def get_cases(split: str, n: int) -> list[dict]:
 # Metrics
 # ---------------------------------------------------------------------------
 
-def compute_metrics(results: list[dict]) -> dict:
+def compute_metrics(results: list[dict], task: TaskConfig) -> dict:
     total = len(results)
     if total == 0:
         return {}
 
+    positive, negative = task.labels  # first label is the "flagged" / positive class
+
     correct = sum(1 for r in results if r["predicted"] == r["ground_truth"])
-    tp = sum(1 for r in results if r["predicted"] == "harmful" and r["ground_truth"] == "harmful")
-    fp = sum(1 for r in results if r["predicted"] == "harmful" and r["ground_truth"] == "benign")
-    fn = sum(1 for r in results if r["predicted"] == "benign"    and r["ground_truth"] == "harmful")
+    tp = sum(1 for r in results if r["predicted"] == positive and r["ground_truth"] == positive)
+    fp = sum(1 for r in results if r["predicted"] == positive and r["ground_truth"] == negative)
+    fn = sum(1 for r in results if r["predicted"] == negative and r["ground_truth"] == positive)
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -265,6 +278,56 @@ def print_metrics(metrics: dict, model_name: str):
     table.add_row("F1",        f'{metrics["f1"]:.3f}')
 
     console.print(table)
+    console.print()
+
+
+def print_class_summary(results: list[dict], labels: tuple[str, str]):
+    """Print a per-class breakdown: correct / incorrect / total for each label."""
+    console.print(Rule("[bold white]Per-Class Breakdown[/bold white]", style="white"))
+
+    table = Table(box=box.ROUNDED, border_style="dim", show_header=True, header_style="bold white")
+    table.add_column("Ground Truth", style="dim", width=14)
+    table.add_column("Correct",      width=9, justify="right")
+    table.add_column("Incorrect",    width=11, justify="right")
+    table.add_column("Total",        width=7, justify="right")
+    table.add_column("Accuracy",     width=10, justify="right")
+
+    for label in labels:
+        class_results = [r for r in results if r["ground_truth"] == label]
+        total = len(class_results)
+        correct = sum(1 for r in class_results if r["predicted"] == label)
+        incorrect = total - correct
+        acc = correct / total if total > 0 else 0.0
+
+        # Show which cases were misclassified as what
+        table.add_row(
+            f"[bold]{label}[/bold]",
+            f"[green]{correct}[/green]",
+            f"[red]{incorrect}[/red]",
+            str(total),
+            f"{acc:.1%}",
+        )
+
+    # Misclassification detail: show what incorrect predictions looked like
+    console.print(table)
+
+    # List individual misclassifications so the user can inspect them
+    mistakes = [r for r in results if r["predicted"] != r["ground_truth"]]
+    if mistakes:
+        console.print()
+        console.print("  [bold yellow]Misclassified cases:[/bold yellow]")
+        for i, r in enumerate(results):
+            if r["predicted"] != r["ground_truth"]:
+                case_num = i + 1
+                console.print(
+                    f"    Case {case_num:>3}: "
+                    f"gt=[cyan]{r['ground_truth']:<8}[/cyan] "
+                    f"pred=[red]{r['predicted']:<8}[/red] "
+                    f"conf={r.get('confidence', 0.0):.2f}"
+                )
+    else:
+        console.print("  [bold green]All cases classified correctly![/bold green]")
+
     console.print()
 
 
@@ -312,7 +375,9 @@ def main():
     args = parse_args()
 
     # --- Resolve task ---
-    task = TASKS[args.task]
+    # If --task wasn't passed, fall back to the dataset's default pairing.
+    task_name = args.task or DATASET_DEFAULT_TASKS.get(args.dataset, DEFAULT_TASK)
+    task = TASKS[task_name]
 
     # --- Header ---
     console.print()
@@ -334,7 +399,9 @@ def main():
         console.print(f"  Judge:      [cyan]{j_model}[/cyan]")
         console.print(f"  Jury:       [cyan]{jr_model}[/cyan]")
     console.print(f"  Max rounds: [cyan]{args.max_rounds}[/cyan]")
-    console.print(f"  Cases:      [cyan]{args.cases}[/cyan]  (split: {args.split})")
+    dataset_detail = f"split: {args.split}" if args.dataset == "jbb" else "summarization_samples"
+    console.print(f"  Dataset:    [cyan]{args.dataset}[/cyan]  ({dataset_detail})")
+    console.print(f"  Cases:      [cyan]{args.cases}[/cyan]")
     console.print(f"  Jurors:     [cyan]{args.jurors}[/cyan]")
 
     ablation_flags = []
@@ -355,7 +422,7 @@ def main():
     graph = build_components(args, tracker, task)
 
     # --- Load data ---
-    cases = get_cases(args.split, args.cases)
+    cases = get_cases(args.dataset, args.split, args.cases)
 
     # --- Run logger (optional) ---
     run_config = {
@@ -369,6 +436,7 @@ def main():
         "max_rounds": args.max_rounds,
         "jurors": args.jurors,
         "cases_requested": args.cases,
+        "dataset": args.dataset,
         "split": args.split,
         "no_filter": args.no_filter,
         "no_defense": args.no_defense,
@@ -440,8 +508,9 @@ def main():
             logger.add_case(result)
 
     # --- Summary ---
-    metrics = compute_metrics(results)
+    metrics = compute_metrics(results, task)
     print_metrics(metrics, args.model)
+    print_class_summary(results, task.labels)
 
     # --- Token summary ---
     # Aggregate token usage across all cases
