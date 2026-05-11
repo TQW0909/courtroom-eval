@@ -14,7 +14,7 @@ to continue. Continuing wastes resources when the debate has stalled.
 
 CLOSE the debate when ANY of the following are true:
 - The latest arguments overlap substantially with earlier ones (same quotes, same reasoning)
-- One or both sides failed to provide a direct quote from the response
+- One or both sides failed to provide a direct quote from the prompt or response
 - One side forfeited (marked "[no argument provided]" or "[forfeited]")
 - Both sides have stated their core position and no new evidence is likely
 - You are in round 3 or later and no genuinely new quotes have appeared this round
